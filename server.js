@@ -1,64 +1,89 @@
 const express = require('express');
-const { Client } = require('@elastic/elasticsearch');
 const cors = require('cors');
+const dotenv = require('dotenv');
+const { Client } = require('@elastic/elasticsearch');
 
+// Load environment variables
+dotenv.config();
+
+// Initialize Express app
 const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-const client = new Client({ node: 'http://localhost:9200' });
-
-app.post('/articles', async (req, res) => {
-    const { title, description, body } = req.body;
-
-    try {
-        const response = await client.index({
-            index: 'articles',
-            document: {
-                title,
-                description,
-                body,
-                createdAt: new Date(),
-            },
-        });
-
-        res.status(201).json({ message: 'Article indexed', id: response._id });
-    } catch (error) {
-        console.error('Indexing error:', error);
-        res.status(500).json({ error: 'Failed to index article' });
-    }
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
 });
 
-app.get('/search', async (req, res) => {
-    const { q } = req.query;
-    if (!q || q.trim() === '') return res.json({ results: [] });
+// Import routes
+const routes = require('./Backend/routes');
 
-    try {
-        const { hits } = await client.search({
-            index: 'articles',
-            query: {
-                multi_match: {
-                    query: q,
-                    fields: ['title^3', 'description^2', 'body'],
-                    fuzziness: 'AUTO',
-                },
-            },
-            size: 10,  // Limit results
-        });
+// Mount routes
+app.use('/api', routes);
 
-        const results = hits.hits.map(hit => ({
-            id: hit._id,
-            ...hit._source,
-        }));
-
-        res.json({ results });
-    } catch (error) {
-        console.error('Search error:', error);
-        res.status(500).json({ error: 'Search failed' });
-    }
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Error:', err.stack);
+  res.status(500).json({
+    success: false,
+    error: 'Something went wrong!'
+  });
 });
 
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Route not found'
+  });
+});
 
+// Initialize Elasticsearch client
+const esClient = new Client({
+  node: process.env.ELASTICSEARCH_URL || 'http://localhost:9200'
+});
 
+// Check Elasticsearch connection on startup
+async function checkElasticsearch() {
+  try {
+    const health = await esClient.cluster.health();
+    console.log('✅ Elasticsearch connected:', health.cluster_name);
+    
+    // Ensure index exists
+    const indexExists = await esClient.indices.exists({ index: 'articles' });
+    if (!indexExists) {
+      console.log('Creating articles index...');
+      await esClient.indices.create({
+        index: 'articles',
+        body: {
+          mappings: {
+            properties: {
+              title: { type: 'text', fields: { keyword: { type: 'keyword' } } },
+              description: { type: 'text' },
+              body: { type: 'text' },
+              author: { type: 'text', fields: { keyword: { type: 'keyword' } } },
+              publication_date: { type: 'date' },
+              timestamp: { type: 'date' }
+            }
+          }
+        }
+      });
+      console.log('✅ Articles index created');
+    }
+  } catch (error) {
+    console.error('❌ Elasticsearch connection failed:', error.message);
+    console.log('Make sure Elasticsearch is running on', process.env.ELASTICSEARCH_URL || 'http://localhost:9200');
+  }
+}
 
-app.listen(4000, () => console.log('Server running on http://localhost:4000'));
+// Start server
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  checkElasticsearch();
+});
